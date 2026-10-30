@@ -1,0 +1,129 @@
+From 897682dcfcd7cfff3d6d25e1eb47aaec46ce6f87 Mon Sep 17 00:00:00 2001
+From: Simon Schippers <simon.schippers@tu-dortmund.de>
+Date: Mon, 19 Oct 2026 11:14:09 +0200
+Subject: [PATCH] tun: add --tun-backpressure option for Linux
+
+When the internal ring of a TUN/TAP device is full, the kernel silently
+drops packets, bypassing any qdisc. TCP then sees loss, retransmits and
+shrinks its congestion window.
+
+My series "tun/tap & vhost-net: apply qdisc backpressure on full
+ptr_ring to reduce TX drops" [1] adds IFF_BACKPRESSURE in Linux 7.3
+(commit d00c7369ef24 "tun/tap & vhost-net: stop tail-drop when
+IFF_BACKPRESSURE is set"). It stops the TX queue instead, so the qdisc
+holds the packets and applies its AQM and fairness.
+
+Our paper [2] evaluated this with OpenVPN: over a 120 ms RTT link
+between Germany and the USA, TCP throughput without the patch was up to
+36% worse, and with it no retransmissions occurred. With higher
+latencies, throughput without the patch can be even worse.
+
+Unfortunately, stopping and waking the queue can reduce throughput with
+many parallel senders: in a synthetic test with eight iperf3 senders,
+throughput dropped from 13.5 to 9.13 Gbit/s [3]. The flag is therefore
+disabled by default and can be enabled with the new --tun-backpressure
+option.
+
+The option is only available when the headers define IFF_BACKPRESSURE,
+and older kernels ignore the flag. The DCO path uses no TUN device and
+is unaffected.
+
+Tested on Linux 7.3-rc3: with --tun-backpressure,
+/sys/class/net/<dev>/tun_flags has IFF_BACKPRESSURE set, without it the
+flag stays clear. Builds without warnings with and without
+IFF_BACKPRESSURE in the headers, and make check passes.
+
+[1] https://lore.kernel.org/netdev/20260803183641.96882-1-simon.schippers@tu-dortmund.de/T/#u
+[2] https://cni.etit.tu-dortmund.de/storages/cni-etit/r/Research/Publications/2025/Gebauer_2025_VTCFall/Gebauer_VTCFall2025_AuthorsVersion.pdf
+[3] https://lore.kernel.org/netdev/akVnoOYQOrt8k-Gu@karahi.librecast.net/
+
+Assisted-by: Claude:claude-opus-5-5
+Signed-off-by: Simon Schippers <simon.schippers@tu-dortmund.de>
+---
+ doc/man-sections/advanced-options.rst |  7 +++++++
+ src/openvpn/options.c                 | 12 ++++++++++++
+ src/openvpn/tun.c                     |  7 +++++++
+ src/openvpn/tun.h                     |  1 +
+ 4 files changed, 27 insertions(+)
+
+diff --git a/doc/man-sections/advanced-options.rst b/doc/man-sections/advanced-options.rst
+index 32008d58f..c578a5c2c 100644
+--- a/doc/man-sections/advanced-options.rst
++++ b/doc/man-sections/advanced-options.rst
+@@ -100,6 +100,13 @@ used when debugging or testing out special usage scenarios.
+   *(Linux only)* Set the TX queue length on the TUN/TAP interface.
+   Currently defaults to operating system default.
+ 
++--tun-backpressure
++  *(Linux only)* Set :code:`IFF_BACKPRESSURE` on the TUN/TAP interface.
++  When OpenVPN falls behind reading from the interface, the kernel then
++  stops the TX queue instead of dropping packets, so the attached qdisc
++  can apply its queue management. This can reduce throughput with many
++  parallel senders. Requires Linux 7.3 or later; older kernels ignore it.
++
+ --disable-dco
+   Disables the opportunistic use of data channel offloading if available.
+   Without this option, OpenVPN will opportunistically use DCO mode if
+diff --git a/src/openvpn/options.c b/src/openvpn/options.c
+index 8e0c6029e..241f3891c 100644
+--- a/src/openvpn/options.c
++++ b/src/openvpn/options.c
+@@ -333,6 +333,8 @@ static const char usage_message[] =
+     "                  via a VRF present on the system.\n"
+ #endif
+     "--txqueuelen n  : Set the tun/tap TX queue length to n (Linux only).\n"
++    "--tun-backpressure : Apply qdisc backpressure instead of dropping packets\n"
++    "                  on the tun/tap device (Linux only).\n"
+     "--mlock         : Disable Paging -- ensures key material and tunnel\n"
+     "                  data will never be written to disk.\n"
+     "--up cmd        : Run command cmd after successful tun device open.\n"
+@@ -5129,6 +5131,16 @@ add_option(struct options *options, char *p[], bool is_inline, const char *file,
+ #else
+         msg(msglevel, "--txqueuelen not supported on this OS");
+         goto err;
++#endif
++    }
++    else if (streq(p[0], "tun-backpressure") && !p[1])
++    {
++        VERIFY_PERMISSION(OPT_P_GENERAL);
++#if defined(TARGET_LINUX) && defined(IFF_BACKPRESSURE)
++        options->tuntap_options.backpressure = true;
++#else
++        msg(msglevel, "--tun-backpressure not supported on this platform");
++        goto err;
+ #endif
+     }
+     else if (streq(p[0], "shaper") && p[1] && !p[2])
+diff --git a/src/openvpn/tun.c b/src/openvpn/tun.c
+index fdd13ae7e..5d6184e55 100644
+--- a/src/openvpn/tun.c
++++ b/src/openvpn/tun.c
+@@ -2100,6 +2100,13 @@ open_tun(const char *dev, const char *dev_type, const char *dev_node, struct tun
+         ifr.ifr_flags |= IFF_ONE_QUEUE;
+ #endif
+ 
++#ifdef IFF_BACKPRESSURE
++        if (tt->options.backpressure)
++        {
++            ifr.ifr_flags |= IFF_BACKPRESSURE;
++        }
++#endif
++
+         /*
+          * Figure out if tun or tap device
+          */
+diff --git a/src/openvpn/tun.h b/src/openvpn/tun.h
+index 61fe943b0..bd2107a78 100644
+--- a/src/openvpn/tun.h
++++ b/src/openvpn/tun.h
+@@ -150,6 +150,7 @@ struct tuntap_options
+ struct tuntap_options
+ {
+     int txqueuelen;
++    bool backpressure;
+ };
+ 
+ #else  /* if defined(_WIN32) || defined(TARGET_ANDROID) */
+-- 
+2.43.0
+
