@@ -62,24 +62,39 @@ Settings via environment variables (`sudo env VAR=... ./bench.sh`):
 | `TXQUEUELEN` | `500 5000` | TUN queue lengths to test |
 | `DURATION` | `30` | seconds per run |
 | `OMIT` | `2` | seconds omitted at the start of each run |
-| `REPS` | `3` | repetitions |
+| `REPS` | `40` | repetitions |
 | `CIPHER` | `AES-256-GCM` | data channel cipher |
 | `UDP_RCVBUF` | `8388608` | OpenVPN `--rcvbuf` in bytes, `0` for the OS default |
 | `OUT` | `results/<timestamp>` | output directory |
 
-The defaults take about 8 minutes.
+The defaults take about 1 hour 40 minutes.
 
 ## Output
 
-At the end, the mean throughput and TX drops of the client TUN device per
-queue length are printed and saved to `summary.txt`:
+At the end, the mean throughput, TX drops of the client TUN device and TCP
+retransmits (iperf3 sender) per queue length are printed and saved to
+`summary.txt`:
 
 ```
-txqueuelen   off Mbit/s    on Mbit/s   change  off drops   on drops
-       500         3043         2666   -12.4%       3204          0
-      5000          ...          ...      ...        ...        ...
+txqueuelen   off Mbit/s    on Mbit/s   change  off drops   on drops   off retr    on retr
+       500         3971         3952    -0.5%      40226          0      36624        531
+      5000         4005         3923    -2.1%       1358          0        658          0
 ```
 
 `OUT` also contains `results.txt` (one line per run: mode, queue length,
-repetition, Mbit/s, TUN drops), the iperf3 and OpenVPN output of each run,
-and `meta.txt` with kernel, OpenVPN version and settings.
+repetition, Mbit/s, TUN drops, retransmits), the iperf3 and OpenVPN output
+of each run, and `meta.txt` with kernel, OpenVPN version and settings.
+
+## Results
+
+AMD Ryzen 9 9950X, Linux 7.3.0-rc3, OpenVPN 54a66f355 with the patch,
+default settings (8 streams, 30 s per run, 40 repetitions, AES-256-GCM):
+
+| txqueuelen | off Mbit/s | on Mbit/s | change | off drops | on drops | off retr | on retr |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 500 | 3971 | 3952 | -0.5% | 40226 | 0 | 36624 | 531 |
+| 5000 | 4005 | 3923 | -2.1% | 1358 | 0 | 658 | 0 |
+
+Throughput, drops and retransmits are means per run. Individual runs range
+from about 3550 to 4550 Mbit/s in every configuration (standard deviation
+340 to 380 Mbit/s).

@@ -15,7 +15,7 @@ STREAMS=${STREAMS:-8}
 TXQUEUELEN=${TXQUEUELEN:-"500 5000"}
 DURATION=${DURATION:-30}
 OMIT=${OMIT:-2}
-REPS=${REPS:-3}
+REPS=${REPS:-40}
 CIPHER=${CIPHER:-AES-256-GCM}
 UDP_RCVBUF=${UDP_RCVBUF:-8388608}
 OUT=${OUT:-$HERE/results/$(date +%Y%m%d-%H%M%S)}
@@ -132,7 +132,7 @@ tun_tx_dropped() { ip netns exec "$NS1" cat /sys/class/net/tun0/statistics/tx_dr
 
 # run_one <mode> <txqueuelen> <rep>
 run_one() {
-    local mode=$1 qlen=$2 rep=$3 log srv mbps d0 drops
+    local mode=$1 qlen=$2 rep=$3 log srv mbps retr d0 drops
     log="$OUT/iperf3-$mode-q$qlen-r$rep.txt"
 
     ip netns exec "$NS2" iperf3 -s -1 -B "$VPN2" >/dev/null 2>&1 &
@@ -144,19 +144,21 @@ run_one() {
     kill "$srv" 2>/dev/null || true
     wait "$srv" 2>/dev/null || true
 
-    # The last receiver line is the sum over all streams.
+    # The last receiver/sender line is the sum over all streams.
     mbps=$(awk '/receiver/ { v = $(NF - 2) } END { print v + 0 }' "$log")
-    echo "$mode $qlen $rep $mbps $drops" >>"$OUT/results.txt"
-    printf '  txqueuelen %-5s backpressure %-3s %6s Mbit/s %8s tun drops\n' "$qlen" "$mode" "$mbps" "$drops"
+    retr=$(awk '/sender/ { v = $(NF - 1) } END { print v + 0 }' "$log")
+    echo "$mode $qlen $rep $mbps $drops $retr" >>"$OUT/results.txt"
+    printf '  txqueuelen %-5s backpressure %-3s %6s Mbit/s %8s tun drops %8s retransmits\n' \
+        "$qlen" "$mode" "$mbps" "$drops" "$retr"
     sleep 2
 }
 
 summary() {
     awk -v qlens="$TXQUEUELEN" '
-        { sum[$1, $2] += $4; drops[$1, $2] += $5; n[$1, $2]++ }
+        { sum[$1, $2] += $4; drops[$1, $2] += $5; retr[$1, $2] += $6; n[$1, $2]++ }
         END {
-            printf "%10s %12s %12s %8s %10s %10s\n", "txqueuelen", "off Mbit/s", "on Mbit/s", "change",
-                   "off drops", "on drops"
+            printf "%10s %12s %12s %8s %10s %10s %10s %10s\n", "txqueuelen", "off Mbit/s", "on Mbit/s",
+                   "change", "off drops", "on drops", "off retr", "on retr"
             split(qlens, qs, " ")
             for (i = 1; i in qs; i++) {
                 q = qs[i]
@@ -164,8 +166,9 @@ summary() {
                 off = sum["off", q] / n["off", q]
                 on = sum["on", q] / n["on", q]
                 change = off ? sprintf("%+.1f%%", 100 * (on - off) / off) : "-"
-                printf "%10d %12.0f %12.0f %8s %10.0f %10.0f\n", q, off, on, change,
-                       drops["off", q] / n["off", q], drops["on", q] / n["on", q]
+                printf "%10d %12.0f %12.0f %8s %10.0f %10.0f %10.0f %10.0f\n", q, off, on, change,
+                       drops["off", q] / n["off", q], drops["on", q] / n["on", q],
+                       retr["off", q] / n["off", q], retr["on", q] / n["on", q]
             }
         }' "$OUT/results.txt"
 }
