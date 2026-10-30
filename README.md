@@ -25,7 +25,9 @@ ns1: iperf3 -c + OpenVPN client  ──veth──  ns2: OpenVPN server + iperf3 
 
 ## Setup
 
-The OpenVPN patch is included in this repository. Build OpenVPN next to it,
+The included OpenVPN patch is v1 of the upstream submission. It adds
+`--tun-backpressure`, so both modes can be compared with the same binary;
+v2 always sets the flag. Build OpenVPN next to this repository,
 on the commit the patch was tested on. `CPPFLAGS` is only needed if the
 kernel headers lack `IFF_BACKPRESSURE`, but does no harm otherwise.
 
